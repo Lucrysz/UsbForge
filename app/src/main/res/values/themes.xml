@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose Material3 kendi temasını uygular; bu stil yalnızca
+         Activity açılış anındaki arka planı ve splash rengini belirler. -->
+    <style name="Theme.UsbForge" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/forge_bg</item>
+        <item name="android:statusBarColor">@color/forge_bg</item>
+        <item name="android:navigationBarColor">@color/forge_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

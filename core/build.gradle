@@ -1,0 +1,37 @@
+// :core — saf JVM modülü.
+//
+// Buradaki hiçbir sınıf android.* paketine bağımlı değildir. Bu sayede
+// masaüstünde (SDK, cihaz veya emülatör olmadan) `gradle :core:test`
+// komutuyla tüm mantık — bölüntü tabloları, FAT32/exFAT/NTFS biçimlendirme,
+// SCSI komut kodlaması, Ventoy yerleşimi — saniyeler içinde test edilir.
+//
+// Android bağımlılığı yalnızca :app modülündedir.
+plugins {
+    id 'org.jetbrains.kotlin.jvm'
+    id 'java-library'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        showStandardStreams = false
+        exceptionFormat = 'full'
+    }
+}
