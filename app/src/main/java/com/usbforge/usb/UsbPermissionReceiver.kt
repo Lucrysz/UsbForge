@@ -52,6 +52,40 @@ object UsbPermissionBus {
         if (deviceName == null) return
         waiters.remove(deviceName)?.invoke(granted)
     }
+
+    /**
+     * *Engelleyici* izin isteği. `Dispatchers.IO` üzerinden, coroutine
+     * dışından cihaz açarken kullanılır.
+     *
+     * @param timeoutMs sistem diyaloğunun yanıt vermeme süresi
+     */
+    fun requestBlocking(manager: UsbManager, device: UsbDevice, timeoutMs: Long = 60_000): Boolean {
+        if (manager.hasPermission(device)) return true
+        val key = device.deviceName
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val result = booleanArrayOf(false)
+
+        waiters[key] = { granted ->
+            result[0] = granted
+            latch.countDown()
+        }
+        try {
+            val context = manager.contextOrNull()
+                ?: return false
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            val pending = PendingIntent.getBroadcast(
+                context,
+                key.hashCode(),
+                Intent(ACTION).setPackage(context.packageName),
+                flags,
+            )
+            manager.requestPermission(device, pending)
+            if (!latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return false
+            return result[0]
+        } finally {
+            waiters.remove(key)
+        }
+    }
 }
 
 /** [UsbManager] üzerinde bağlama bilgisi döndürmek için küçük genişletme. */

@@ -23,4 +23,8 @@
     <string name="ad_top">Reklam Alanı (Üst Banner)</string>
     <string name="ad_bottom">Reklam Alanı (Alt Banner)</string>
     <string name="ad_note">Gelecekte reklam ağı bağlanacak konteyner</string>
+
+    <!-- Bildirim kanalı -->
+    <string name="channel_write_name">Yazma işlemleri</string>
+    <string name="channel_write_desc">USB biçimlendirme ve ISO yazma işlemlerinin arka planda sürmesini sağlar.</string>
 </resources>

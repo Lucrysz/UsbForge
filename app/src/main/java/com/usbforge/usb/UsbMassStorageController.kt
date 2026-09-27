@@ -11,6 +11,7 @@ import android.util.Log
 import java.io.Closeable
 import java.nio.charset.StandardCharsets
 import kotlin.math.min
+import kotlinx.coroutines.runBlocking
 
 /**
  * USB Mass Storage Class cihazı üzerinde ham blok erişimi sağlar.
@@ -586,15 +587,32 @@ class UsbMassStorageController private constructor(
         }
 
         /** Cihazı açar ve tanır. Detaylı hata durumları için [UsbException] türevleri fırlatır. */
-        suspend fun open(context: Context, device: UsbDevice): UsbMassStorageController {
+        suspend fun open(context: Context, device: UsbDevice): UsbMassStorageController =
+            openInternal(context, device, blocking = false)
+
+        /**
+         * [open] metodunun engelleyici (blocking) sürümü.
+         * `Dispatchers.IO` üzerinden, coroutine bağlamı olmadan çağrılmalıdır.
+         */
+        fun openBlocking(context: Context, device: UsbDevice): UsbMassStorageController =
+            openInternal(context, device, blocking = true)
+
+        private fun openInternal(
+            context: Context,
+            device: UsbDevice,
+            blocking: Boolean,
+        ): UsbMassStorageController {
             val manager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
                 ?: throw UsbUnsupportedException(
                     "Bu cihazda USB Host desteği yok (UsbManager bulunamadı). OTG/OTD özellikli telefon gerekir."
                 )
 
-            if (!UsbPermissionBus.request(manager, device)) {
-                throw UsbAccessException("USB erişim izni verilmedi.")
+            val granted = if (blocking) {
+                UsbPermissionBus.requestBlocking(manager, device)
+            } else {
+                runBlocking { UsbPermissionBus.request(manager, device) }
             }
+            if (!granted) throw UsbAccessException("USB erişim izni verilmedi.")
 
             val iface = findMassStorageInterface(device)
                 ?: throw UsbUnsupportedException(

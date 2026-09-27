@@ -1,11 +1,13 @@
 package com.usbforge.usb
 
+import com.usbforge.core.util.Bytes
+
 /**
  * Bir USB Mass Storage cihazının tespit edilmiş bilgileri.
  *
  * [sectorSize] her zaman 512'e normalize edilmiştir; cihaz 4096 baytlık
  * mantıksal blok bildirse bile tüm LBA hesapları 512 baytlık sektör
- * tabanlıdır (GPT, MBR, dosya sistemi matematiği böyle varsayar).
+ * tabanlıdır (GPT, MBR ve dosya sistemi matematiği böyle varsayar).
  */
 data class UsbStorageDevice(
     val deviceName: String,
@@ -17,37 +19,28 @@ data class UsbStorageDevice(
     val usbVersion: Float,
     val sectorSize: Int,
     val totalSectors: Long,
-    val isReadOnly: Boolean = false,
     val removable: Boolean = true,
 ) {
     val sizeBytes: Long get() = totalSectors * sectorSize
-    val sizeMiB: Long get() = sizeBytes / (1024L * 1024L)
     val sizeGiB: Double get() = sizeBytes / (1024.0 * 1024.0 * 1024.0)
-    val isHuge: Boolean get() = totalSectors > 0x0FFFFFFF1L // 2 TiB sınırı (READ(10))
 
-    /** Mantıksal blok boyutına normalize edilmiş LBA aralığı. */
-    val lastLba: Long get() = totalSectors - 1
+    /** READ(10) sınırını aşan cihaz (2 TiB üstü) — READ(16) gerekir. */
+    val needs16ByteCommands: Boolean get() = totalSectors > 0x0FFFFFFF1L
 
-    fun summary(): String = buildString {
-        append(product.trim().ifEmpty { "USB Storage" })
+    /** Kısa görünen ad (arayüzde). */
+    val displayName: String
+        get() = product.trim().ifEmpty { deviceName }
+
+    /** Üst satır: ad + seri no. */
+    fun titleLine(): String = buildString {
+        append(displayName)
         if (serial.isNotBlank()) append("  ·  S/N ").append(serial)
     }
+
+    /** Alt satır: boyut + bağlantı detayı. */
+    fun subtitleLine(): String = buildString {
+        append(Bytes.human(sizeBytes))
+        if (needs16ByteCommands) append("  ·  2 TiB+ (READ16)")
+        append("  ·  ").append(deviceName)
+    }
 }
-
-/** Denetleyici tarafından döndürülen kapasite bilgisi. */
-data class DiskCapacity(
-    val sectorSize: Int,
-    val totalSectors: Long,
-) {
-    val sizeBytes: Long get() = totalSectors * sectorSize
-}
-
-/** Cihaz üzerinde yapılan her blok erişiminde çağrılan ilerleme geri çağırımı. */
-fun interface ByteProgress {
-    fun onBytes(bytes: Long)
-}
-
-/** Cihaz hazırlığı sırasında üretilen olaylar (UI log satırı olarak gösterilir). */
-data class UsbLogLine(val level: LogLevel, val message: String)
-
-enum class LogLevel { INFO, WARN, ERROR }
