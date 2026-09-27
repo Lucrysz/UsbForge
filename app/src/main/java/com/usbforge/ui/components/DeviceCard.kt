@@ -10,7 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -97,11 +97,16 @@ fun DeviceCardList(
             }
         }
 
-        LazyColumn(
+        // Düz Column, LazyColumn DEĞİL: bu liste ana ekranın
+        // verticalScroll() sarmalayıcısının içindedir ve bir LazyList'e
+        // sınırsız yükseklik kısıtı verilmesi Compose tarafından reddedilir
+        // ("infinity maximum height constraints"). USB cihaz sayısı birkaç
+        // düzeyde olduğu için tembel liste gereksizdir.
+        Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(Spacing.sm),
         ) {
-            items(devices, key = { it.device.deviceName }) { row ->
+            devices.forEach { row ->
                 DeviceCard(
                     row = row,
                     selected = row.device.deviceName == selectedName,

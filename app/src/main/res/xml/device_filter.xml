@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  USB Host cihaz filtresi.
+
+  Bu dosya, USB bellek takıldığında uygulamanın otomatik açılması için
+  gereklidir: Android, USB_DEVICE_ATTACHED yayınını yalnızca manifest'te
+  bildirilen cihaz sınıfları için gönderir.
+
+  ============================================================================
+  ÖNEMLİ: Neden `xmlns:android` YOK ve neden `class=` yazılıyor?
+  ============================================================================
+  `<usb-class>` / `<usb-device>` etiketleri AAPT tarafından tip denetimine
+  tabi tutulmaz. Çerçevedeki `UsbDeviceFilter` bu dosyayı **çalışma anında**
+  ham `AttributeSet` ile okur ve nitelikleri ad alanı olmadan ister:
+
+      sa.getAttributeIntValue(null, "class", -1)
+      sa.getAttributeIntValue(null, "subclass", -1)
+
+  Bu yüzden:
+  - `xmlns:android="..."` bildirilirse AAPT2 "attribute android:class not
+    found" hatası verir (çerçevenin public R.attr'ında hiç usb* niteliği
+    yoktur; USB Host nitelikleri @hide/gizlidir).
+  - Değerler **ondalık** yazılır; çerçeve `Integer.parseInt` kullanır,
+    `0x` ön eki burada hata verir.
+  - Resmî Android örneklerinde de nitelikler ad alansızdır.
+
+  ============================================================================
+  Sınıf değerleri (USB sınıf kodları)
+  ============================================================================
+  0 = tanımlanmamış, 1 = ses, 3 = HID, 5 = video/PTP, 6 = image,
+  7 = yazıcı, 8 = storage, 255 = uygulama özel.
+  Flash bellekler çoğunlukla 0/6 ya da 8/6 bildirir; liste bu yüzden
+  geniş tutulmuştur. Hiçbiri eşleşmezse uygulama otomatik açılmaz, ancak
+  kullanıcı tarafından açıldığında tüm Mass Storage cihazları yine de
+  listelenir (cihaz taraması `UsbMassStorageController.enumerate` ile
+  yapılır, filtre yalnızca otomatik açılışı etkiler).
+-->
+<resources>
+    <!-- USB Mass Storage: flash bellekler genelde 0 (tanımlanmamış) bildirir -->
+    <usb-class class="0" subclass="6" />
+    <usb-class class="0" subclass="1" />
+
+    <!-- Storage sınıfı: taşınabilir sürücü / kart okuyucu -->
+    <usb-class class="8" subclass="6" />
+    <usb-class class="8" subclass="7" />
+    <usb-class class="8" subclass="3" />
+
+    <!-- PTP (kamera) cihazları yanlışlıkla gelirse işlem yapılamaz -->
+    <usb-class class="8" subclass="5" />
+</resources>

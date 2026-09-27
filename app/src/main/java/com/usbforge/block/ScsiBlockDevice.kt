@@ -1,8 +1,10 @@
 package com.usbforge.block
 
-import com.usbforge.core.usb.ScsiTransferCancelled
+import com.usbforge.core.block.BlockAccessException
+import com.usbforge.core.block.BlockDevice
+import com.usbforge.core.block.BlockWriteCancelled
+import com.usbforge.usb.ScsiTransferCancelled
 import com.usbforge.usb.UsbMassStorageController
-import com.usbforge.core.usb.SECTOR
 
 /**
  * [BlockDevice] implementasyonu; arka planda USB Mass Storage (BOT/SCSI)
@@ -39,7 +41,7 @@ class ScsiBlockDevice(
         try {
             controller.write(startLba, src, srcOffset, length, isCancelled, onChunk)
         } catch (c: ScsiTransferCancelled) {
-            throw BlockWriteCancelled(c.message)
+            throw BlockWriteCancelled(c.message ?: "Yazma kullanıcı tarafından durduruldu.")
         } catch (t: Throwable) {
             throw BlockAccessException(t.message ?: "SCSI yazma hatası", t)
         }
@@ -52,8 +54,10 @@ class ScsiBlockDevice(
         dstOffset: Int,
         isCancelled: () -> Boolean,
     ) {
+        val sectors = length / SECTOR_SIZE
+        require(sectors * SECTOR_SIZE == length) { "Okuma uzunluğu 512'nin katı olmalı, $length verildi." }
         try {
-            controller.read(startLba, length / SECTOR, dst, dstOffset)
+            controller.read(startLba, sectors, dst, dstOffset)
         } catch (t: Throwable) {
             throw BlockAccessException(t.message ?: "SCSI okuma hatası", t)
         }
@@ -66,6 +70,11 @@ class ScsiBlockDevice(
             inq.revision.trim().ifEmpty { null },
         )
         return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    }
+
+    companion object {
+        /** Tüm LBA hesapları bu sabite göre yapılır. */
+        const val SECTOR_SIZE = 512
     }
 
     override fun flush() {

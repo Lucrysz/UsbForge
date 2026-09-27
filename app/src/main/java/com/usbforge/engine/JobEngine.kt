@@ -1,5 +1,9 @@
 package com.usbforge.engine
 
+import com.usbforge.core.engine.JobSnapshot
+import com.usbforge.core.engine.JobStatus
+import com.usbforge.core.engine.LogLine
+import com.usbforge.core.engine.ProgressReporter
 import com.usbforge.core.usb.LogLevel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -10,44 +14,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
-enum class JobStatus { IDLE, RUNNING, SUCCESS, FAILED, CANCELLED }
-
-/** Arayüze yayınlanan tek anlık iş durumu. */
-data class JobSnapshot(
-    val id: Long = 0L,
-    val title: String = "",
-    val phase: String = "",
-    val writtenBytes: Long = 0L,
-    val totalBytes: Long = 0L,
-    val bytesPerSecond: Long = 0L,
-    val elapsedMs: Long = 0L,
-    val status: JobStatus = JobStatus.IDLE,
-    val error: String? = null,
-    val log: List<LogLine> = emptyList(),
-) {
-    val isActive: Boolean get() = status == JobStatus.RUNNING
-    val isTerminal: Boolean
-        get() = status == JobStatus.SUCCESS || status == JobStatus.FAILED || status == JobStatus.CANCELLED
-
-    /** 0..1 arası ilerleme. [totalBytes] bilinmiyorsa 0. */
-    val fraction: Float
-        get() = if (totalBytes <= 0L) 0f
-        else (writtenBytes.toDouble() / totalBytes.toDouble()).coerceIn(0.0, 1.0).toFloat()
-
-    val percentText: String
-        get() = if (totalBytes <= 0L) "—" else "%3.1f%%".format(fraction * 100f)
-
-    /** Kalan süre tahmini (saniye). Veri yetersizse -1. */
-    val etaSeconds: Long
-        get() {
-            if (totalBytes <= 0L || bytesPerSecond <= 0L) return -1L
-            val remaining = totalBytes - writtenBytes
-            if (remaining <= 0L) return 0L
-            return remaining / bytesPerSecond
-        }
-}
-
-data class LogLine(val level: LogLevel, val message: String, val atMs: Long)
 
 /**
  * Tüm uzun süren blok I/O işlerini çalıştıran tek nokta.
@@ -180,12 +146,12 @@ class JobEngine(private val scope: CoroutineScope) {
         private var written: Long = 0L
 
         @Volatile
-        private var phase: String = "Hazırlanıyor…"
+        private var currentPhase: String = "Hazırlanıyor…"
 
         override val totalBytes: Long get() = total
         override val writtenBytes: Long get() = written
         override val bytesPerSecond: Long get() = meter.current()
-        override val phase: String get() = phase
+        override val phase: String get() = currentPhase
         override val isCancelled: Boolean get() = cancelFlag.get()
 
         override fun setTotal(totalBytes: Long) {
@@ -205,7 +171,7 @@ class JobEngine(private val scope: CoroutineScope) {
         }
 
         override fun setPhase(phase: String) {
-            this.phase = phase
+            currentPhase = phase
             push()
         }
 
@@ -215,10 +181,11 @@ class JobEngine(private val scope: CoroutineScope) {
 
         private fun push() {
             val elapsed = (System.nanoTime() - startedNanos) / 1_000_000L
+            val phaseSnapshot = currentPhase
             _state.update {
                 it.copy(
                     id = id,
-                    phase = phase,
+                    phase = phaseSnapshot,
                     writtenBytes = written,
                     totalBytes = total,
                     bytesPerSecond = meter.current(),

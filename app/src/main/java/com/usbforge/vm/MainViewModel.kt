@@ -9,11 +9,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.usbforge.core.block.BlockDevice
 import com.usbforge.core.block.BlockWriteCancelled
-import com.usbforge.core.block.RootBlockDevice
-import com.usbforge.core.block.RootShellProvider
-import com.usbforge.core.block.ScsiBlockDevice
-import com.usbforge.core.disk.CancelledByUser
+import com.usbforge.core.block.CancelledByUser
 import com.usbforge.core.disk.DiskWriter
+import com.usbforge.core.usb.LogLevel
 import com.usbforge.core.disk.IsoWriter
 import com.usbforge.core.partition.FileSystemKind
 import com.usbforge.core.partition.PartitionPlan
@@ -21,9 +19,8 @@ import com.usbforge.core.partition.PartitionScheme
 import com.usbforge.core.util.Bytes
 import com.usbforge.core.ventoy.VentoyInstaller
 import com.usbforge.engine.JobEngine
-import com.usbforge.engine.JobSnapshot
-import com.usbforge.engine.JobStatus
-import com.usbforge.usb.LogLevel
+import com.usbforge.core.engine.JobSnapshot
+import com.usbforge.core.engine.JobStatus
 import com.usbforge.usb.UsbMassStorageController
 import com.usbforge.usb.UsbStorageDevice
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +32,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import com.usbforge.block.RootBlockDevice
+import com.usbforge.block.RootShellProvider
+import com.usbforge.block.ScsiBlockDevice
 
 /** Kullanıcının seçtiği iş tipi. */
 enum class OperationKind(val label: String) {
@@ -161,9 +161,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return emptyList()
     }
 
-    /** USB cihazı açar ve kapasitesini okur. */
+    /**
+     * USB cihazı açar ve kapasitesini okur.
+     *
+     * `Dispatchers.IO` üzerinden çağrılır; cihaz açılamazsa kapasitesiz bir
+     * kayıt döner (listede görünür ama yazma başlatılamaz).
+     */
+    /**
+     * USB sürümünü Float olarak döndürür.
+     *
+     * API 31'de `UsbDevice.version` int (BCD, ör. 0x0200) iken Float
+     * (ör. 2.0) dönmeye başladı; her iki durumda da çalışan tek bir yol
+     * bırakılmıştır.
+     */
+    @Suppress("DEPRECATION")
+    private fun usbVersionOf(device: android.hardware.usb.UsbDevice): Float {
+        val raw = device.version
+        return when (raw) {
+            is Float -> raw / 1000f   // zaten ondalık (ör. 2.0)
+            else -> (raw as Int) / 1000f
+        }
+    }
     private fun describe(context: Context, usbDevice: android.hardware.usb.UsbDevice): UsbStorageDevice {
-        val controller = runBlockingQuiet { UsbMassStorageController.open(context, usbDevice) }
+        val controller = runCatching { UsbMassStorageController.openBlocking(context, usbDevice) }
+            .getOrNull()
         if (controller == null) {
             return UsbStorageDevice(
                 deviceName = usbDevice.deviceName,
@@ -172,26 +193,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 manufacturer = "",
                 product = usbDevice.productName ?: usbDevice.deviceName,
                 serial = usbDevice.serialNumber ?: "",
-                usbVersion = usbDevice.version / 1000f,
+                usbVersion = usbVersionOf(usbDevice),
                 sectorSize = 512,
                 totalSectors = 0,
             )
         }
-        return controller.let {
-            val result = UsbStorageDevice(
-                deviceName = usbDevice.deviceName,
-                vendorId = usbDevice.vendorId,
-                productId = usbDevice.productId,
-                manufacturer = it.inquiry.vendor,
-                product = it.inquiry.product.ifBlank { usbDevice.productName ?: usbDevice.deviceName },
-                serial = it.inquiry.serial.ifBlank { usbDevice.serialNumber ?: "" },
-                usbVersion = usbDevice.version / 1000f,
-                sectorSize = it.capacity.sectorSize,
-                totalSectors = it.capacity.totalSectors,
-            )
-            it.close()
-            result
-        }
+        val result = UsbStorageDevice(
+            deviceName = usbDevice.deviceName,
+            vendorId = usbDevice.vendorId,
+            productId = usbDevice.productId,
+            manufacturer = controller.inquiry.vendor,
+            product = controller.inquiry.product.ifBlank { usbDevice.productName ?: usbDevice.deviceName },
+            serial = controller.inquiry.serial.ifBlank { usbDevice.serialNumber ?: "" },
+            usbVersion = usbVersionOf(usbDevice),
+            sectorSize = controller.capacity.sectorSize,
+            totalSectors = controller.capacity.totalSectors,
+        )
+        runCatching { controller.close() }
+        return result
     }
 
     private suspend fun <T> runBlockingQuiet(block: suspend () -> T): T? =

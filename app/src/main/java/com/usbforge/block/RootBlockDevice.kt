@@ -1,28 +1,36 @@
 package com.usbforge.block
 
+import com.usbforge.core.block.BlockAccessException
+import com.usbforge.core.block.BlockDevice
 import java.io.File
 
 /**
- * Root'lu cihazlarda doğrudan `/dev/block/*` erişimi.
+ * Root'lu cihazlarda doğrudan `/dev/block` altındaki blok yoluna erişim.
  *
- * Android'in `dd` yardımcı programı her Android sürümünde bulunur ve
- * `toybox`/`coreutils` implementasyonları `iflag=fullblock` ve
- * `conv=fsync` seçeneklerini destekler. Bu nedenle shell üzerinden akış
- * kurmak, JNI ile `ioctl` çağırmaktan çok daha güvenilirdir.
+ * ## Neden `dd` üzerinden
+ * Android'in `dd` yardımcı programı her Android sürümünde bulunur
+ * (`toybox`/`coreutils`) ve `conv=fsync`, `iflag=fullblock`, `seek=`/`skip=`
+ * seçeneklerini destekler. Bu nedenle shell üzerinden akış kurmak, JNI ile
+ * `ioctl` çağırmaktan çok daha güvenilirdir.
  *
  * ## Akış protokolü
  * Kalıcı bir `su` kabuğu açılır. Her yazma isteği için kabuğa:
  * ```
- * head -c <bayt> /proc/self/fd/0 | dd of=<hedef> bs=1048576 oflag=direct conv=fsync
+ * head -c <bayt> /proc/self/fd/0 | dd of=<hedef> bs=512 seek=<lba> conv=fsync
  * ```
- * yazılır. `head -c` sayesinde EOF belirsizliği ortadan kalkar: `dd`
- * tam olarak istenen bayt sayısını yazdıktan sonra kapanır. Ardından
+ * yazılır. `head -c` sayesinde EOF belirsizliği ortadan kalkar: `dd` tam
+ * olarak istenen bayt sayısını yazdıktan sonra kapanır. Ardından
  * `echo <marker>` komutu ile tamamlanma bildirimi alınır.
  *
  * ## Güvenlik
- * Blok cihaz yolu yalnızca uygulamanın kendi kök denetimi içinde
- * doğrulanır; kullanıcıdan gelen ham yol `^\/dev\/block\/[a-z0-9/]+$`
- * desenine uymak zorundadır.
+ * Blok cihaz yolu yalnızca `^/dev/block/[A-Za-z0-9/._-]+$` desenine uymak
+ * zorundadır; [isValidPath] bunu doğrular. Böylece kullanıcıdan gelen bir
+ * metin keyfi dosyaya yönlendirilemez.
+ *
+ * ## Bağlı bölümler
+ * Ham yazma yapabilmek için cihazın bağlı bölümleri ayrılmalıdır; kernel'in
+ * sayfa önbelleği blok cihazın üzerine yazmaya çalışırsa EIO alınır.
+ * [close] ayrılan bölümleri geri bağlar.
  */
 class RootBlockDevice private constructor(
     override val displayName: String,
@@ -40,8 +48,7 @@ class RootBlockDevice private constructor(
     private var unmounted: List<String> = emptyList()
 
     override fun prepareForWrite() {
-        // Bağlı partition'ları ayır; kernel'in page cache'i blok
-        // cihazın üzerine yazmasına izin vermezse yazma EIO ile başarısız olur.
+        // Bağlı partition'ları ayır; aksi hâlde ham yazma EIO ile başarısız olur.
         unmounted = unmountAllPartitions(devicePath)
         shell.sync()
     }
@@ -78,16 +85,16 @@ class RootBlockDevice private constructor(
     }
 
     override fun close() {
-        // Disk partition'larını geri bağla — kullanıcı cihazı kullanamaz hale
-        // gelmesin. Başarısız olursa sorun değil; bir sonr açılışta düzelir.
+        // Disk bölümlerini geri bağla — kullanıcı cihazı kullanamaz hale
+        // gelmesin. Başarısız olursa sorun değil; sonraki açılışta düzelir.
         for (p in unmounted) runCatching { shell.exec("mount $p") }
         unmounted = emptyList()
     }
 
     companion object {
-        private val PATH_PATTERN = Regex("^/dev/block/[A-Za-z0-9/_.\\-]+$")
+        private val PATH_PATTERN = Regex("^/dev/block/[A-Za-z0-9/._-]+$")
 
-        /** `ls /dev/block` çıktısından blok cihaz adlarını döndürür. */
+        /** `ls /dev/block` çıktısından blok cihaz yollarını döndürür. */
         fun listBlockDevices(): List<String> = runCatching {
             val process = ProcessBuilder("su", "-c", "ls -1 /dev/block 2>/dev/null")
                 .redirectErrorStream(true)
@@ -104,7 +111,8 @@ class RootBlockDevice private constructor(
 
         /**
          * Verilen blok cihaza erişim sağlar. [totalSectors] bilinmiyorsa
-         * `blockdev --getsz` ile sorgulanır.
+         * `blockdev --getsz` ile, o da yoksa `/sys/class/block` üzerinden
+         * sorgulanır.
          */
         fun open(path: String, totalSectorsHint: Long = 0L): RootBlockDevice {
             require(isValidPath(path)) { "Geçersiz blok cihaz yolu: $path" }
@@ -113,11 +121,10 @@ class RootBlockDevice private constructor(
         }
 
         private fun querySectors(path: String): Long {
-            val shell = RootShell.instance()
-            val blockdev = shell.exec("blockdev --getsz $path 2>/dev/null").trim()
-            blockdev.toLongOrNull()?.let { return it }
-            val catSize = shell.exec("cat /sys/class/block/${File(path).name}/size 2>/dev/null").trim()
-            return catSize.toLongOrNull()?.takeIf { it > 0 }
+            val shell = requireRootShell()
+            shell.exec("blockdev --getsz $path 2>/dev/null").trim().toLongOrNull()?.let { return it }
+            val sysfs = shell.exec("cat /sys/class/block/${File(path).name}/size 2>/dev/null").trim()
+            return sysfs.toLongOrNull()?.takeIf { it > 0 }
                 ?: throw BlockAccessException("'$path' boyutu belirlenemedi (root erişimi yok?).")
         }
 
@@ -126,7 +133,7 @@ class RootBlockDevice private constructor(
          * @return ayrılan partition yolları (yeniden bağlamak için)
          */
         private fun unmountAllPartitions(base: String): List<String> {
-            val shell = RootShell.instance()
+            val shell = requireRootShell()
             val name = File(base).name
             val candidates = buildList {
                 add(base)

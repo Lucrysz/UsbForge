@@ -8,6 +8,8 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.util.Log
+import com.usbforge.core.usb.DiskCapacity
+import com.usbforge.core.usb.Scsi
 import java.io.Closeable
 import java.nio.charset.StandardCharsets
 import kotlin.math.min
@@ -474,8 +476,10 @@ class UsbMassStorageController private constructor(
             val len = n * SECTOR
             if (random && n < WIPE_CHUNK_SECTORS) {
                 // Son kısmi geçişte kalıbın tekrar etmemesi için tazele.
-                java.util.Arrays.fill(buf, 0, len, 0)
-                rnd.nextBytes(buf, 0, len)
+                // nextBytes bir aralık kabul etmez; yalnızca tam boyutlu
+                // tampon doldurulur, kalanı sıfırlanır.
+                rnd.nextBytes(buf)
+                java.util.Arrays.fill(buf, len, buf.size, 0.toByte())
             }
             write(lba, buf, 0, len, isCancelled) { onChunk?.invoke(len.toLong()) }
             lba += n
@@ -645,7 +649,7 @@ class UsbMassStorageController private constructor(
 
             val controller = UsbMassStorageController(device, conn, iface, endpoints.first, endpoints.second, LUN0)
             try {
-                controller.probe()
+                runBlocking { controller.probe() }
             } catch (t: Throwable) {
                 controller.close()
                 throw t

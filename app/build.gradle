@@ -41,6 +41,26 @@ android {
         compose true
     }
 
+    /**
+     * Yalnızca debug varyantında birim testi üretilir.
+     *
+     * `createComposeRule` çalışma zamanında `ui-test-manifest` içindeki
+     * `ComponentActivity` tanımına ihtiyaç duyar; bu bağımlılık
+     * `debugImplementation` ile verilir. Release varyantında aynı testler
+     * çalıştırılırsa "Compose test etkinliği bulunamadı" hatası verir ve
+     * `gradlew test` aynı işi iki kez yapar. Bu yüzden release birim
+     * testleri devre dışı bırakılır. Çalıştırılacak görev:
+     *
+     * ```
+     * ./gradlew :app:testDebugUnitTest
+     * ```
+     */
+    androidComponents {
+        beforeVariants(selector().withBuildType("release")) { variant ->
+            variant.enableUnitTest = false
+        }
+    }
+
     // Robolectric'in src/main/res ve kaynakları görmesi için gerekli.
     testOptions {
         unitTests {

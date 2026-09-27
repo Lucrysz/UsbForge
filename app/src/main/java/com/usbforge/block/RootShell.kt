@@ -1,5 +1,7 @@
 package com.usbforge.block
 
+import com.usbforge.core.block.BlockAccessException
+import com.usbforge.core.block.BlockWriteCancelled
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -7,13 +9,12 @@ import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Kalıcı bir `su` kabuğu üzerinden komut çalıştırır ve ikili veri akışı
- * sağlar.
+ * Kalıcı bir `su` kabuğu üzerinden komut çalıştırır ve ikili veri akışı sağlar.
  *
  * Android'de root erişimi olan uygulamaların kullandığı standart desen
  * budur: `ProcessBuilder("su")` ile bir kabuk açılır, komutlar stdin'den
  * yazılır, çıktı stdout'tan okunur. Kabuk açık kaldığı için her yazma
- * işleminde yeniden süreç başlatma maliyeti (hundreds of ms) ödenmez.
+ * işleminde yeniden süreç başlatma maliyeti (yüzlerce ms) ödenmez.
  *
  * ## Neden `head -c` ile sınırlandırıyoruz
  * Ham ikili veri stdin'e yazıldığında kabuktan EOF üretmek imkânsızdır
@@ -21,11 +22,15 @@ import java.util.concurrent.atomic.AtomicInteger
  * yazma işlemini tam olarak N bayta sınırlar ve kendisi kapanır; ardından
  * `dd` işini bitirir. Böylece belirsizlik yoktur.
  *
+ * ## Konumlandırma
+ * `dd ... seek=N bs=512` ile blok cihazda lseek yapılır; `skip` bayt bayt
+ * okumaz, bu yüzden büyük LBA değerlerinde de hızlıdır.
+ *
  * ## Eşzamanlılık
  * Tüm metotlar [lock] ile serileştirilir; kabuk üzerinde aynı anda yalnızca
  * bir komut çalışır.
  */
-class RootShell private constructor(
+class RootShell internal constructor(
     private val process: Process,
 ) {
 
@@ -47,7 +52,7 @@ class RootShell private constructor(
         sendCommand(command)
         val marker = nextMarker()
         sendCommand("echo $marker")
-        String(readUntil(marker.toByteArray(StandardCharsetsAscii), TIMEOUT_CONTROL), StandardCharsetsAscii)
+        String(readUntil(marker.toByteArray(ASCII), TIMEOUT_CONTROL), ASCII)
             .trimEnd('\n', '\r')
     }
 
@@ -71,11 +76,11 @@ class RootShell private constructor(
         onChunk: ((bytes: Long) -> Unit)?,
     ) = synchronized(lock) {
         val marker = nextMarker()
-        // `head -c` veri akışını N bayta sınırlar; `skip=` ise blok cihazda
+        // `head -c` veri akışını N bayta sınırlar; `seek=` ise blok cihazda
         // lseek ile konumlanır (bayt bayt okumaz, bu yüzden hızlıdır).
-        val cmd = "head -c $length /proc/self/fd/0 | dd of=$path bs=512 seek=$startLba" +
+        val command = "head -c $length /proc/self/fd/0 | dd of=$path bs=512 seek=$startLba" +
                 " conv=fsync 2>/dev/null; echo $marker"
-        sendCommand(cmd)
+        sendCommand(command)
         // Şimdi ikili veriyi yaz: kabuk `head` komutunu çalıştırırken stdin'i
         // tüketir.
         var written = 0
@@ -87,10 +92,10 @@ class RootShell private constructor(
             onChunk?.invoke(piece.toLong())
         }
         stdin.flush()
-        val trailing = readUntil(marker.toByteArray(StandardCharsetsAscii), TIMEOUT_IO)
-        val err = String(trailing, StandardCharsetsAscii).trim()
-        if (err.isNotEmpty()) {
-            throw BlockAccessException("dd çıktısı: $err")
+        val trailing = readUntil(marker.toByteArray(ASCII), TIMEOUT_IO)
+        val error = String(trailing, ASCII).trim()
+        if (error.isNotEmpty()) {
+            throw BlockAccessException("dd çıktısı: $error")
         }
     }
 
@@ -98,11 +103,11 @@ class RootShell private constructor(
     fun readFromDevice(path: String, startLba: Long, length: Int): ByteArray = synchronized(lock) {
         val marker = nextMarker()
         val sectors = length / 512
-        val cmd = "dd if=$path bs=512 skip=$startLba count=$sectors iflag=fullblock 2>/dev/null; echo $marker"
-        sendCommand(cmd)
+        val command = "dd if=$path bs=512 skip=$startLba count=$sectors iflag=fullblock 2>/dev/null; echo $marker"
+        sendCommand(command)
         val buf = ByteArray(length)
         readFully(buf, length, TIMEOUT_IO)
-        readUntil(marker.toByteArray(StandardCharsetsAscii), TIMEOUT_CONTROL)
+        readUntil(marker.toByteArray(ASCII), TIMEOUT_CONTROL)
         buf
     }
 
@@ -110,13 +115,17 @@ class RootShell private constructor(
 
     private fun sendCommand(command: String) {
         check(!closed) { "Root kabuğu kapatılmış." }
-        stdin.write(command.toByteArray(StandardCharsetsAscii))
+        stdin.write(command.toByteArray(ASCII))
         stdin.write('\n'.code)
         stdin.flush()
     }
 
     private fun nextMarker(): String = "__UF${markerCounter.incrementAndGet()}__"
 
+    /**
+     * [marker] dizisi görülene kadar stdout'u okur.
+     * İkili veri akışlarında kullanıldığı için çıktı **döner**, yok sayılmaz.
+     */
     private fun readUntil(marker: ByteArray, timeoutMs: Int): ByteArray {
         val out = ByteArrayOutputStream(256)
         var matched = 0
@@ -125,14 +134,13 @@ class RootShell private constructor(
             if (System.nanoTime() > deadline) {
                 throw BlockAccessException(
                     "Root komutu zaman aşımına uğradı ($timeoutMs ms): " +
-                            String(out.toByteArray(), StandardCharsetsAscii)
+                            String(out.toByteArray(), ASCII)
                 )
             }
             val b = stdout.read()
             if (b < 0) {
                 throw BlockAccessException(
-                    "Root kabuğu kapandı. Çıktı: " +
-                            String(out.toByteArray(), StandardCharsetsAscii)
+                    "Root kabuğu kapandı. Çıktı: " + String(out.toByteArray(), ASCII)
                 )
             }
             if (b.toByte() == marker[matched]) {
@@ -142,8 +150,8 @@ class RootShell private constructor(
                 if (matched > 0) {
                     out.write(marker, 0, matched)
                     matched = 0
-                    // Kısmi eşleşmeden sonra bu bayt yeni eşleşme başlangıcı
-                    // olabilir; tek bayt olduğu için doğrudan yazmak yeterlidir.
+                    // Kısmi eşleşmeden sonra bu bayt yeni eşleşmenin başlangıcı
+                    // olabilir; tek bayt olduğu için doğrudan yazmak yeterli.
                     if (b.toByte() == marker[0]) matched = 1
                 }
                 out.write(b)
@@ -173,9 +181,8 @@ class RootShell private constructor(
     }
 
     private companion object {
-        val StandardCharsetsAscii = java.nio.charset.StandardCharsets.US_ASCII
+        val ASCII = java.nio.charset.StandardCharsets.US_ASCII
         const val BUFFER_SIZE = 256 * 1024
-        const val DD_BLOCK = 1024 * 1024
         const val TIMEOUT_CONTROL = 10_000
         const val TIMEOUT_IO = 60_000
     }
@@ -200,10 +207,7 @@ object RootShellProvider {
         if (unavailable) return null
 
         val created = runCatching {
-            val p = ProcessBuilder("su")
-                .redirectErrorStream(false)
-                .start()
-            RootShell(p)
+            RootShell(ProcessBuilder("su").redirectErrorStream(false).start())
         }.getOrNull() ?: run {
             unavailable = true
             return null
@@ -211,8 +215,8 @@ object RootShellProvider {
 
         // Bazı `su` uygulamaları ilk çıktıda banner basar; kabuğu bir komutla
         // "uyandırıp" marker mekanizmasını hazırlıyoruz.
-        val ok = runCatching { created.exec("echo ready") }.getOrNull()?.contains("ready") == true
-        if (!ok || !created.isRoot) {
+        val alive = runCatching { created.exec("echo ready") }.getOrNull()?.contains("ready") == true
+        if (!alive || !created.isRoot) {
             runCatching { created.close() }
             unavailable = true
             return null
@@ -231,7 +235,7 @@ object RootShellProvider {
     }
 }
 
-/** Kolaylık erişimi: root kabuğu ya da hata. */
+/** Kolaylık erişimi: root kabuğu ya da anlaşılır bir hata. */
 fun requireRootShell(): RootShell =
     RootShellProvider.get() ?: throw BlockAccessException(
         "Root erişimi yok. Bu işlem için cihazın root'lu olması ve `su` üzerinden izin verilmesi gerekir."
