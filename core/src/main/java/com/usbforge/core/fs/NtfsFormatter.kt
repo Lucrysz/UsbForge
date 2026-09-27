@@ -64,6 +64,7 @@ class NtfsFormatter(
 
         // --- 1. Önyükleme bölgesi -------------------------------------------
         progress.setPhase("NTFS önyükleme kaydı hazırlanıyor")
+        device.prepareForWrite()
         val head = ByteArray(64 * 512)
         val boot = buildBootSector(g)
         System.arraycopy(boot, 0, head, 0, 512)                  // sektör 0
@@ -73,7 +74,7 @@ class NtfsFormatter(
 
         // --- 2. $MFT ---------------------------------------------------------
         progress.setPhase("NTFS \$MFT yazılıyor (16 sistem kaydı)")
-        val mft = ByteArray(g.mftClusters * g.clusterSize)
+        val mft = ByteArray((g.mftClusters * g.clusterSize).toInt())
         var o = 0
         for (record in buildSystemRecords(g)) {
             System.arraycopy(record, 0, mft, o, g.recordSize)
@@ -83,48 +84,47 @@ class NtfsFormatter(
 
         // --- 3. $MFTMirr -----------------------------------------------------
         progress.setPhase("NTFS \$MFTMirr yazılıyor")
-        val mirror = ByteArray(g.mftMirrorClusters * g.clusterSize)
+        val mirror = ByteArray((g.mftMirrorClusters * g.clusterSize).toInt())
         System.arraycopy(mft, 0, mirror, 0, 4 * g.recordSize)
         device.write(startLba + g.lbaOf(g.mftMirrorLcn), mirror) { progress.addWritten(it) }
 
         // --- 4. $Bitmap ------------------------------------------------------
         progress.setPhase("NTFS küme bitmap'i yazılıyor (${g.bitmapClusters} küme)")
-        val bitmap = ByteArray(g.bitmapClusters * g.clusterSize)
-        // 0..sonSistemKumesi arası tüm kümeler "dolu" işaretlenir. NTFS
-        // küme 0'ı da kullanılıyor sayar (önyükleme alanı 0-3 küme aralığında).
-        var bit = 0
-        while (bit <= g.lastSystemCluster) {
-            val byteIndex = (bit / 8).toInt()
+        val bitmap = ByteArray((g.bitmapClusters * g.clusterSize).toInt())
+        // 0..sonSistemKumesi arası **her** küme "dolu" işaretlenir
+        // (1 bit = 1 küme). NTFS küme 0'ı da kullanılıyor sayar; önyükleme
+        // alanı 0-3 küme aralığında olduğu için bu doğrudur.
+        for (cluster in 0..g.lastSystemCluster) {
+            val byteIndex = (cluster / 8).toInt()
             if (byteIndex >= bitmap.size) break
-            bitmap[byteIndex] = (bitmap[byteIndex].toInt() or (1 shl (bit % 8))).toByte()
-            bit += 8
+            bitmap[byteIndex] = (bitmap[byteIndex].toInt() or (1 shl (cluster % 8).toInt())).toByte()
         }
         device.write(startLba + g.lbaOf(g.bitmapLcn), bitmap) { progress.addWritten(it) }
 
         // --- 5. $UpCase ------------------------------------------------------
         progress.setPhase("NTFS \$UpCase tablosu yazılıyor (128 KiB)")
-        val upcase = ByteArray(g.upCaseClusters * g.clusterSize)
+        val upcase = ByteArray((g.upCaseClusters * g.clusterSize).toInt())
         buildUpCase(upcase)
         device.write(startLba + g.lbaOf(g.upCaseLcn), upcase) { progress.addWritten(it) }
 
         // --- 6. $LogFile (sıfırlanmış) --------------------------------------
         progress.setPhase("NTFS \$LogFile hazırlanıyor (${g.logFileClusters * g.clusterSize / 1024} KiB)")
-        val log = ByteArray(g.logFileClusters * g.clusterSize)
+        val log = ByteArray((g.logFileClusters * g.clusterSize).toInt())
         device.write(startLba + g.lbaOf(g.logFileLcn), log) { progress.addWritten(it) }
 
         // --- 7. $AttrDef -----------------------------------------------------
         progress.setPhase("NTFS \$AttrDef yazılıyor")
-        val attrDef = ByteArray(g.attrDefClusters * g.clusterSize)
+        val attrDef = ByteArray((g.attrDefClusters * g.clusterSize).toInt())
         buildAttrDef(attrDef)
         device.write(startLba + g.lbaOf(g.attrDefLcn), attrDef) { progress.addWritten(it) }
 
         // --- 8. Kök dizin $INDEX_ALLOCATION + bitmap ------------------------
         progress.setPhase("NTFS kök dizini yazılıyor")
-        val indexAlloc = ByteArray(g.indexClusters * g.clusterSize)
+        val indexAlloc = ByteArray((g.indexClusters * g.clusterSize).toInt())
         buildIndxRecord(indexAlloc, 0, g.indexRecordSize)
         device.write(startLba + g.lbaOf(g.indexAllocLcn), indexAlloc) { progress.addWritten(it) }
 
-        val indexBitmap = ByteArray(g.indexBitmapClusters * g.clusterSize)
+        val indexBitmap = ByteArray((g.indexBitmapClusters * g.clusterSize).toInt())
         device.write(startLba + g.lbaOf(g.indexBitmapLcn), indexBitmap) { progress.addWritten(it) }
 
         device.flush()
@@ -147,9 +147,14 @@ class NtfsFormatter(
 
     // ------------------------------------------------------ sistem MFT kayıtları
 
-    /** 0..15 arasındaki kayıtları üretir (16. ve sonrası boş bırakılır). */
+    /**
+     * 0..15 arasındaki kayıtları üretir.
+     *
+     * 16. kayıttan sonrası boş bırakılır; ilk kullanıcı dosyasının numarası
+     * 24 olur (17..23 de Windows tarafından rezerve edilir).
+     */
     private fun buildSystemRecords(g: NtfsGeometry): List<ByteArray> {
-        val records = MutableList(g.recordSize) { ByteArray(g.recordSize) } // boş (kullanılmıyor)
+        val records = MutableList(SYSTEM_RECORD_COUNT) { ByteArray(g.recordSize) } // boş (kullanılmıyor)
         records[0] = mftRecord(g)
         records[5] = rootRecord(g)
         records[6] = fileRecord(g, 6, "\$Bitmap", g.bitmapLcn, g.bitmapClusters, g.bitmapClusters * g.clusterSize)
@@ -165,7 +170,7 @@ class NtfsFormatter(
 
     /** Kayıt 0: $MFT'in kendisi. */
     private fun mftRecord(g: NtfsGeometry): ByteArray {
-        val b = MftRecord(g.recordSize, 0, sequence = 1, flags = FLAG_IN_USE or FLAG_SYSTEM)
+        val b = MftRecord(g.recordSize, 0, sequence = 1, flags = FLAG_IN_USE)
         b.addResident(AT_STANDARD_INFORMATION, null, standardInformation(), ID_SI)
         b.addResident(AT_FILE_NAME, null, fileName("\$MFT", ROOT_REF, isDirectory = false), ID_FN)
         b.addResident(AT_BITMAP, null, ByteArray(g.clusterSize), ID_MFT_BITMAP)
@@ -176,14 +181,14 @@ class NtfsFormatter(
             allocSize = g.mftClusters * g.clusterSize,
             dataSize = g.mftClusters * g.clusterSize,
             initSize = g.mftClusters * g.clusterSize,
-            id = ID_DATA,
+            idHint = ID_DATA,
         )
         return b.build()
     }
 
     /** Kayıt 5: kök dizin. */
     private fun rootRecord(g: NtfsGeometry): ByteArray {
-        val b = MftRecord(g.recordSize, 5, sequence = 5, flags = FLAG_IN_USE or FLAG_DIRECTORY or FLAG_SYSTEM)
+        val b = MftRecord(g.recordSize, 5, sequence = 5, flags = FLAG_IN_USE or FLAG_DIRECTORY)
         b.addResident(AT_STANDARD_INFORMATION, null, standardInformation(), ID_SI)
         b.addResident(
             AT_FILE_NAME, null,
@@ -198,9 +203,9 @@ class NtfsFormatter(
             allocSize = g.indexClusters * g.clusterSize,
             dataSize = g.indexClusters * g.clusterSize,
             initSize = g.indexClusters * g.clusterSize,
-            id = ID_INDEX_ALLOC,
+            idHint = ID_INDEX_ALLOC,
         )
-        b.addResident(AT_BITMAP, "\$I30", ByteArray(g.indexBitmapClusters * g.clusterSize), ID_INDEX_BITMAP)
+        b.addResident(AT_BITMAP, "\$I30", ByteArray((g.indexBitmapClusters * g.clusterSize).toInt()), ID_INDEX_BITMAP)
         return b.build()
     }
 
@@ -213,7 +218,7 @@ class NtfsFormatter(
         clusters: Long,
         size: Long,
     ): ByteArray {
-        val b = MftRecord(g.recordSize, number, sequence = 1, flags = FLAG_IN_USE or FLAG_SYSTEM)
+        val b = MftRecord(g.recordSize, number, sequence = 1, flags = FLAG_IN_USE)
         b.addResident(AT_STANDARD_INFORMATION, null, standardInformation(), ID_SI)
         b.addResident(AT_FILE_NAME, null, fileName(name, ROOT_REF, isDirectory = false), ID_FN)
         b.addNonResident(
@@ -223,7 +228,7 @@ class NtfsFormatter(
             allocSize = size,
             dataSize = size,
             initSize = size,
-            id = ID_DATA,
+            idHint = ID_DATA,
         )
         return b.build()
     }
@@ -235,7 +240,7 @@ class NtfsFormatter(
         name: String,
         parent: Long,
     ): ByteArray {
-        val b = MftRecord(g.recordSize, number, sequence = 1, flags = FLAG_IN_USE or FLAG_DIRECTORY or FLAG_SYSTEM)
+        val b = MftRecord(g.recordSize, number, sequence = 1, flags = FLAG_IN_USE or FLAG_DIRECTORY)
         b.addResident(AT_STANDARD_INFORMATION, null, standardInformation(), ID_SI)
         b.addResident(AT_FILE_NAME, null, fileName(name, parent, isDirectory = true), ID_FN)
         b.addResident(AT_INDEX_ROOT, null, indexRootValue(g, isExtend = true), ID_INDEX_ROOT)
@@ -243,10 +248,23 @@ class NtfsFormatter(
     }
 
     companion object {
-        // MFT kayıt bayrakları
+        /** Üretilen sistem kaydı sayısı (0..15). */
+        const val SYSTEM_RECORD_COUNT = 16
+
+        /**
+         * MFT kayıt bayrakları (NTFS 3.1, bkz. $FILE_RECORD.flags).
+         *
+         * NTFS'te "sistem dosyası" diye bir bayrak **yoktur**; sistem
+         * dosyaları yalnızca $MFT'te 24'ten küçük numarayla yer alır.
+         * 0x0004 ise `IS_4` bayrağıdır ve 1024 bayttan küçük kayıtlar için
+         * kullanılır — bizim kayıtlarımız 1024 bayt olduğundan bu bayrak
+         * doğru olarak 0 bırakılır.
+         */
         const val FLAG_IN_USE = 0x0001
         const val FLAG_DIRECTORY = 0x0002
-        const val FLAG_SYSTEM = 0x0004
+        const val FLAG_IS_4 = 0x0004
+        const val FLAG_IS_16 = 0x0008
+        const val FLAG_IS_32 = 0x0010
 
         // Öznitelik türleri
         const val AT_STANDARD_INFORMATION = 0x10
@@ -284,9 +302,6 @@ class NtfsFormatter(
         private const val NT_EPOCH = 100_000_000_000_000_000L
 
         // ------------------------------------------------------------- veri yapıları
-
-        /** Bir dosyanın fiziksel yerleşimi: [lengthClusters] küme, [lbaDelta] fark. */
-        data class Run(val lengthClusters: Long, val lbaDelta: Long)
 
         // ---------------------------------------------------------- önyükleme kaydı
 
@@ -460,10 +475,11 @@ class NtfsFormatter(
                 saved[i] = ((buf[offset + i * 512 - 2].toInt() and 0xFF) shl 8) or
                         (buf[offset + i * 512 - 1].toInt() and 0xFF)
             }
-            // 2) ABD'yi yerleştir
+            // 2) ABD'yi yerleştir. NTFS, her sektörün **son 2 baytına**
+            //    ABD'nin *küçük bayt* sırasıyla yazılmasını ister.
             for (i in 1..sectorCount) {
-                buf[offset + i * 512 - 2] = ((abd shr 8) and 0xFF).toByte()
-                buf[offset + i * 512 - 1] = (abd and 0xFF).toByte()
+                buf[offset + i * 512 - 2] = (abd and 0xFF).toByte()
+                buf[offset + i * 512 - 1] = ((abd shr 8) and 0xFF).toByte()
             }
             // 3) Uzama dizisini yaz
             putLe16(buf, offset + 0x04, usaOffset)
@@ -613,6 +629,15 @@ class NtfsFormatter(
 }
 
 /**
+ * Bir dosyanın fiziksel yerleşimi (NTFS "run").
+ *
+ * @param lengthClusters bu çalıştırmadaki küme sayısı
+ * @param lbaDelta       çalıştırmanın mutlak başlangıç LBA'sı
+ *                       ([encodeRuns] ilk çalıştırmada mutlak, sonrakilerde
+ *                       fark olarak yorumlar)
+ */
+data class Run(val lengthClusters: Long, val lbaDelta: Long)
+/**
  * Tek bir MFT kaydı (FILE kaydı) oluşturan ve fixup uygulayan yapıcı.
  *
  * Kayıt düzeni (NTFS 3.1, bkz. [MFT_RECORD]):
@@ -654,7 +679,7 @@ class MftRecord(
         putLe16(buf, 0x12, 1)                        // hard link count
         putLe16(buf, 0x14, ATTRS_OFFSET)             // attributes offset
         putLe16(buf, 0x16, flags)                    // flags
-        putLe32(buf, 0x1C, recordSize)               // bytes allocated
+        putLe32(buf, 0x1C, recordSize.toLong())               // bytes allocated
         putLe64(buf, 0x20, 0)                        // base record
         putLe32(buf, 0x2C, recordNumber.toLong())    // record number
     }
@@ -694,7 +719,7 @@ class MftRecord(
     fun addNonResident(
         type: Int,
         name: String?,
-        runs: List<NtfsFormatter.Run>,
+        runs: List<Run>,
         allocSize: Long,
         dataSize: Long,
         initSize: Long,
@@ -718,7 +743,7 @@ class MftRecord(
         putLe16(buf, o + 12, 0)                            // flags
         putLe16(buf, o + 14, (idHint or nextAttrId).toShort().toInt())
         putLe64(buf, o + 16, 0)                            // lowest VCN
-        putLe64(buf, o + 24, highestVcn)                   // highest VCN
+        putLe64(buf, o + 24, highestVcn.toLong())                   // highest VCN
         putLe16(buf, o + 32, pairsOffset)                  // mapping pairs offset
         putLe16(buf, o + 34, 0)                            // compression unit
         putLe32(buf, o + 36, 0)                            // reserved

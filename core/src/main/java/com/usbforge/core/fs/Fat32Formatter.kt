@@ -50,18 +50,18 @@ class Fat32Formatter(
         geo = g
 
         progress.setPhase("FAT32 önyükleme kaydı hazırlanıyor")
-        val now = DosTime.now()
+        device.prepareForWrite()
 
         val boot = buildBootSector(g, label, volumeSerial)
         val fsInfo = buildFsInfo(g)
         val backupBoot = buildBootSector(g, label, volumeSerial)
         val backupFsInfo = buildFsInfo(g)
 
-        val firstSector = ByteArray(512 * 8) // 4 sektörlük metadata bloğu
-        System.arraycopy(boot, 0, firstSector, 0, 512)
-        System.arraycopy(fsInfo, 0, firstSector, 512, 512)
-        System.arraycopy(boot, 0, firstSector, 4 * 512, 512) // 6. sektör: yedek önyükleme
-        System.arraycopy(fsInfo, 0, firstSector, 5 * 512, 512) // 7. sektör: yedek FSInfo
+        val firstSector = ByteArray(512 * 8) // 8 sektörlük metadata bloğu
+        System.arraycopy(boot, 0, firstSector, 0, 512)             // 0: önyükleme kaydı
+        System.arraycopy(fsInfo, 0, firstSector, 512, 512)        // 1: FSInfo
+        System.arraycopy(boot, 0, firstSector, 6 * 512, 512)      // 6: yedek önyükleme
+        System.arraycopy(fsInfo, 0, firstSector, 7 * 512, 512)    // 7: yedek FSInfo
 
         progress.setPhase("FAT32 önyükleme kaydı yazılıyor")
         device.write(startLba, firstSector) { progress.addWritten(it) }
@@ -76,7 +76,6 @@ class Fat32Formatter(
             val n = minOf(256L, fatSectors - offsetSectors).toInt()
             val len = n * 512
             java.util.Arrays.fill(fatBuffer, 0, len, 0.toByte())
-            // 0. ve 1. küme özel değerler
             if (offsetSectors == 0L) {
                 putLe32(fatBuffer, 0, 0xFFFFFFF8L) // küme 0: medya + EOC
                 putLe32(fatBuffer, 4, 0xFFFFFFFFL) // küme 1: rezerve
@@ -85,6 +84,14 @@ class Fat32Formatter(
                 progress.addWritten(it)
             }
             offsetSectors += n
+        }
+
+        // Kök dizinin **tüm** küme zincirini kur: 2 → 3 → … → son → EOC.
+        // Böylece veri tahsisi (bkz. Fat32Writer) kök dizinin üzerine yazmaz.
+        progress.setPhase("Kök dizin zinciri kuruluyor (${g.rootDirClusters} küme)")
+        for (c in g.rootCluster until g.rootCluster + g.rootDirClusters) {
+            val last = c == g.rootCluster + g.rootDirClusters - 1
+            writeFatEntry(device, g, c, if (last) 0xFFFFFFFFL else (c + 1).toLong(), startLba, progress)
         }
 
         // İkinci FAT'ı kopyala (yedek güvenlik).
@@ -98,22 +105,11 @@ class Fat32Formatter(
             copied += n
         }
 
-        // Kök dizin kümesini işaretle (küme 2 sonu, işaretçisiz).
-        val rootFatOffset = ((g.rootCluster - 2) * 4)
-        val fatSectorInCopy = rootFatOffset / 512
-        val fatSector = ByteArray(512)
-        device.read(startLba + firstSectorOfFat + fatSectorInCopy, 512, fatSector)
-        putLe32(fatSector, (rootFatOffset % 512).toInt(), 0xFFFFFFFFL)
-        device.write(startLba + firstSectorOfFat + fatSectorInCopy, fatSector) { progress.addWritten(it) }
-        device.write(startLba + firstSectorOfFat + fatSectors + fatSectorInCopy, fatSector) {
-            progress.addWritten(it)
-        }
-
         // Kök dizinin ilk sektörü: yalnızca birim etiketi girdisi.
         progress.setPhase("Kök dizin oluşturuluyor")
         val rootDir = ByteArray(512)
         writeShortEntry(
-            dir = rootDir,
+            buf = rootDir,
             offset = 0,
             name = label.toFatLabel(),
             attr = ATTR_VOLUME_ID,
@@ -182,10 +178,10 @@ class Fat32Formatter(
             putLe16(b, 0x1A, 255)                        // heads
             putLe32(b, 0x1C, 0)                          // hidden sectors
             putLe32(b, 0x20, 0)                          // total sectors 32 (0 = kullanma)
-            putLe32(b, 0x24, g.fatSectors)               // FAT size 32
+            putLe32(b, 0x24, g.fatSectors.toLong())               // FAT size 32
             putLe16(b, 0x28, 0)                          // ext flags
             putLe16(b, 0x2A, 0)                          // fs version
-            putLe32(b, 0x2C, g.rootCluster)              // root cluster
+            putLe32(b, 0x2C, g.rootCluster.toLong())              // root cluster
             putLe16(b, 0x30, 1)                          // FSInfo sector
             putLe16(b, 0x32, 6)                          // backup boot sector
             // 0x34..0x3F reserved (zaten 0)
@@ -229,7 +225,7 @@ class Fat32Formatter(
             putLe32(b, 0x00, 0x41615252L)      // lead signature
             putLe32(b, 0x04, 0x61417272L)      // structure signature
             putLe32(b, 0x08, (g.clusterCount - 2).toLong())  // free cluster count
-            putLe32(b, 0x0C, g.rootCluster)     // next free cluster (root isimli)
+            putLe32(b, 0x0C, g.rootCluster.toLong())     // next free cluster (root isimli)
             putLe32(b, 0x10, 0xAA550000L)      // trail signature
             return b
         }
@@ -248,6 +244,39 @@ class Fat32Formatter(
 
         internal fun putLe16At(b: ByteArray, off: Int, v: Int) = putLe16(b, off, v)
 
+        /**
+         * Kısa (8.3) dizin girdisi yazar. FAT32 biçimlendirirken kök
+         * dizine birim etiketi eklemek için kullanılır.
+         *
+         * Düzen: 0..10 ad · 11 öznitelik · 12 NTRes · 13 yüzde · 14..15
+         * oluşturma saati · 16..17 oluşturma tarihi · 18..19 erişim tarihi ·
+         * 20..21 küme yüksek · 22..23 yazma saati · 24..25 yazma tarihi ·
+         * 26..27 küme düşük · 28..31 dosya boyutu.
+         */
+        internal fun writeShortEntry(
+            buf: ByteArray,
+            offset: Int,
+            name: String,
+            attr: Int,
+            firstCluster: Int,
+            size: Long,
+        ) {
+            val padded = name.take(11).padEnd(11, ' ')
+            for (i in 0 until 11) buf[offset + i] = padded[i].code.toByte()
+            buf[offset + 11] = attr.toByte()
+            buf[offset + 12] = 0
+            buf[offset + 13] = 0
+            val stamp = DosTime.now()
+            putLe16(buf, offset + 14, stamp and 0xFFFF)
+            putLe16(buf, offset + 16, (stamp shr 16) and 0xFFFF)
+            putLe16(buf, offset + 18, (stamp shr 16) and 0xFFFF)
+            putLe16(buf, offset + 20, (firstCluster shr 16) and 0xFFFF)
+            putLe16(buf, offset + 22, stamp and 0xFFFF)
+            putLe16(buf, offset + 24, (stamp shr 16) and 0xFFFF)
+            putLe16(buf, offset + 26, firstCluster and 0xFFFF)
+            putLe32(buf, offset + 28, size and 0xFFFFFFFFL)
+        }
+
         /** Küçük bayt sırasında 32 bit okur. */
         internal fun readLe32(b: ByteArray, off: Int): Long = (b[off].toLong() and 0xFF) or
                 ((b[off + 1].toLong() and 0xFF) shl 8) or
@@ -258,6 +287,27 @@ class Fat32Formatter(
         fun String.toFatLabel(): String =
             uppercase().filter { it.isLetterOrDigit() || it == '_' || it == '-' }
                 .take(11).padEnd(11, ' ')
+
+        /**
+         * [cluster] için FAT girişini **her iki** FAT kopyasına yazar.
+         * Kök dizin 64 KiB'ı aşabildiği için tek sektörlük okuma-yazma
+         * yeterli değildir; sektör önce okunup sonra yazılır.
+         */
+        private fun writeFatEntry(
+            device: BlockDevice,
+            geo: Fat32Geometry,
+            cluster: Int,
+            value: Long,
+            startLba: Long,
+            progress: ProgressReporter,
+        ) {
+            val lba = startLba + geo.fatOffset + geo.fatSectorIndexOf(cluster)
+            val buf = ByteArray(512)
+            device.read(lba, 512, buf)
+            putLe32(buf, geo.fatByteOffsetOf(cluster), value)
+            device.write(lba, buf) { progress.addWritten(it) }
+            device.write(lba + geo.fatSectors, buf) { progress.addWritten(it) }
+        }
     }
 }
 
@@ -276,11 +326,26 @@ data class Fat32Geometry(
     val clusterSize: Int get() = sectorsPerCluster * 512
     val fatOffset: Long get() = reservedSectors.toLong()
 
-    /** [cluster] numarasının 1. FAT içindeki sektör numarası. */
-    fun fatSectorIndexOf(cluster: Int): Int = ((cluster - 2) * 4) / 512
+    /**
+     * Kök dizine ayrılmış küme sayısı.
+     *
+     * FAT'teki kök dizin girdisi **tek bir küme** gösterir (küme 2 → EOC).
+     * Biçimlendirici bu dizinin tüm küme zincirini kurar, böylece veri
+     * tahsisi kök dizinin üzerine yazmaz.
+     */
+    val rootDirClusters: Int get() = (rootDirSectors / sectorsPerCluster).coerceAtLeast(1)
 
-    /** [cluster] numarasının sektör içindeki bayt ofseti. */
-    fun fatByteOffsetOf(cluster: Int): Int = ((cluster - 2) * 4) % 512
+    /**
+     * FAT dizisindeki giriş numarası, küme numarasına **eşittir**.
+     *
+     * 0. giriş (medya tanımlayıcı) bayt ofseti 0'dadır, 1. giriş 4'te,
+     * 2. giriş (kök dizin) 8'dedir. Bu yüzden ofset `cluster * 4`'tür;
+     * veri kümelerinin 2'den başlaması ofseti etkilemez.
+     */
+    fun fatSectorIndexOf(cluster: Int): Int = (cluster * 4) / 512
+
+    /** [cluster] girişinin sektör içindeki bayt ofseti. */
+    fun fatByteOffsetOf(cluster: Int): Int = (cluster * 4) % 512
 
     /** [cluster] numarasının disk üzerindeki ilk sektörü. */
     fun dataSectorOf(cluster: Int): Long =

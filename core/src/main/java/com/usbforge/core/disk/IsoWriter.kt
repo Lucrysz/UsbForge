@@ -1,6 +1,7 @@
 package com.usbforge.core.disk
 
 import com.usbforge.core.block.BlockDevice
+import com.usbforge.core.block.CancelledByUser
 import com.usbforge.core.engine.ProgressReporter
 import com.usbforge.core.usb.LogLevel
 import java.io.IOException

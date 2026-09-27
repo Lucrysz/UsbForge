@@ -23,12 +23,19 @@ kotlin {
 }
 
 dependencies {
+    // Formatter API'si suspend işlevler sunar; testlerde runBlocking ile
+    // çağrılırlar.
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0'
+
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.named('test') {
     useJUnitPlatform()
+    // Sahte diskler sektör sektör ayrıldığı için bu değer rahat aşılabilir;
+    // yine de ISO testleri 8 MiB tampon kullanıyor.
+    maxHeapSize = "2g"
     testLogging {
         events 'passed', 'skipped', 'failed'
         showStandardStreams = false

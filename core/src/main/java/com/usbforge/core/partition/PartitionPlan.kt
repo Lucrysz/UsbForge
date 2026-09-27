@@ -81,11 +81,12 @@ data class PartitionPlan(
                 // sonra, 1 MiB sınırına hizalı başlar.
                 PartitionScheme.MBR -> alignUp(1L)
                 // GPT'de ilk kullanılabilir LBA 34'tür; yine 1 MiB'ye hizalanır.
-                PartitionScheme.GPT -> alignUp(GptTable.FIRST_USABLE_LBA)
+                PartitionScheme.GPT -> alignUp(GptTable.FIRST_USABLE_LBA.toLong())
             }
             val end = when (scheme) {
                 PartitionScheme.MBR -> diskSectors - 1
-                PartitionScheme.GPT -> diskSectors - 1 - GptTable.ENTRY_ARRAY_SECTORS - 1
+                // GPT'de son 33 sektör yedek başlığa ayrılmıştır.
+                PartitionScheme.GPT -> GptTable.lastUsableLba(diskSectors)
             }
             return PartitionPlan(
                 scheme = scheme,

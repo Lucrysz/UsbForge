@@ -1,6 +1,8 @@
 package com.usbforge.core.disk
 
 import com.usbforge.core.block.BlockDevice
+import com.usbforge.core.block.BlockNotWritableException
+import com.usbforge.core.block.CancelledByUser
 import com.usbforge.core.engine.ProgressReporter
 import com.usbforge.core.fs.ExFatFormatter
 import com.usbforge.core.fs.Fat32Formatter
@@ -152,15 +154,17 @@ class DiskWriter {
         // 0: koruyucu MBR
         device.write(0, layout.protectiveMbr) { progress.addWritten(it) }
         // 1: birincil başlık
-        device.write(GptTable.HEADER_SECTOR, layout.primaryHeader) { progress.addWritten(it) }
+        device.write(GptTable.HEADER_SECTOR.toLong(), layout.primaryHeader) { progress.addWritten(it) }
         // 2..33: giriş dizisi (32 sektör)
-        device.write(GptTable.ENTRY_ARRAY_SECTOR, layout.entryArray) { progress.addWritten(it) }
+        device.write(GptTable.ENTRY_ARRAY_SECTOR.toLong(), layout.entryArray) { progress.addWritten(it) }
 
-        // Disk sonu: yedek giriş dizisi + yedek başlık
-        val backupEntryLba = device.totalSectors - 1 - GptTable.BACKUP_ENTRY_ARRAY_SECTORS
-        device.write(backupEntryLba, layout.backupEntryArray) { progress.addWritten(it) }
+        // Disk sonu: yedek giriş dizisi + yedek başlık.
+        // DİKKAT: yedek başlık diskin *son* sektöründedir; buraya koruyucu
+        // MBR yazılırsa başlık imha olur.
+        device.write(GptTable.backupEntryArrayLba(device.totalSectors), layout.backupEntryArray) {
+            progress.addWritten(it)
+        }
         device.write(device.totalSectors - 1, layout.backupHeader) { progress.addWritten(it) }
-        device.write(device.totalSectors - 1, layout.protectiveMbr) { progress.addWritten(it) }
 
         device.flush()
         progress.log(

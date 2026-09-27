@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * doğrulamak için çağrı geçmişini kaydeder: hangi fazlara geçildi, toplam
  * ne bildirildi, kaç bayt sayıldı.
  */
-class RecordingReporter(
+open class RecordingReporter(
     override val title: String = "test",
     override val totalBytes: Long = 0L,
 ) : ProgressReporter {
@@ -20,9 +20,13 @@ class RecordingReporter(
     val logs = mutableListOf<Pair<LogLevel, String>>()
     var flushRequests = 0
 
+    /** [addWritten] ile bildirilen toplam bayt (alt sınıflar bunu kullanır). */
+    var totalWritten: Long = 0L
+        private set
+
     private val cancelled = AtomicBoolean(false)
 
-    override val writtenBytes: Long = 0L
+    override val writtenBytes: Long get() = totalWritten
     override val bytesPerSecond: Long = 0L
     override val phase: String get() = phases.lastOrNull() ?: ""
     override val isCancelled: Boolean get() = cancelled.get()
@@ -38,7 +42,7 @@ class RecordingReporter(
     }
 
     override fun addWritten(bytes: Long) {
-        // Sessiz: yüz binlerce çağrı olabilir.
+        totalWritten += bytes
     }
 
     override fun setPhase(phase: String) {

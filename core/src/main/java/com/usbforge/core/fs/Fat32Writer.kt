@@ -41,8 +41,15 @@ class Fat32Writer(
     var directoryCount: Int = 0
         private set
 
-    private var nextHint = 2
-    private var freeClusters: Int = geo.clusterCount - 2
+    /**
+     * Bir sonraki tahsis edilecek küme.
+     *
+     * Küme 0 ve 1 FAT'e özeldir; küme 2'den itibaren kök dizin zinciri
+     * işgal eder. Tahsis bu noktadan başlar, aksi hâlde kök dizinin üzerine
+     * yazılırdı.
+     */
+    private var nextHint = 2 + geo.rootDirClusters
+    private var freeClusters: Int = (geo.clusterCount - 2 - geo.rootDirClusters).coerceAtLeast(0)
 
     // ------------------------------------------------------------------ genel API
 
@@ -214,7 +221,7 @@ class Fat32Writer(
                 device.read(partitionStartLba + geo.fatOffset + secIndex, 512, buf)
             }
             val value = Fat32Formatter.readLe32(buf, byteOff)
-            run = if (value == FREE) run + 1 else 0
+            run = if (value == FREE.toLong()) run + 1 else 0
             if (run == count) {
                 candidate = c - count + 1
                 // Aday küme zincirini kesinleştir

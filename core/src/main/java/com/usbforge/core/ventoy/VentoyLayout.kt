@@ -64,8 +64,17 @@ object VentoyLayout {
     /** 0x55AA imzasının aranacağı maksimum sektör sayısı. */
     const val MAX_MBR_SCAN = 16L
 
-    /** EFI bölümünün exFAT olarak biçimlendirilmesi daha güvenlidir. */
-    const val EFI_IS_EXFAT = true
+    /**
+     * VTOYEFI bölümü FAT32 olarak biçimlendirilir.
+     *
+     * ## Neden exFAT değil
+     * exFAT şartnamesi bir hacimde **en az 1024 küme** ister. 32 MiB'lık
+     * bir bölüm en küçük geçerli küme boyutuyla (64 KiB) yalnızca 512
+     * küme sunar; bu exFAT için geçersizdir ve Windows "birimi biçimlendir"
+     * hatası verir. FAT32'nin 32 MiB'da geçerli olması ve önyükleme
+     * dosyalarının yazılabilmesi (bkz. [Fat32Writer]) belirleyicidir.
+     */
+    const val EFI_IS_EXFAT = false
 
     data class Geometry(
         val diskSectors: Long,

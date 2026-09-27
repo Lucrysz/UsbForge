@@ -28,7 +28,27 @@ object GptTable {
     const val ENTRY_SIZE = 128
     const val ENTRY_ARRAY_SECTORS = ENTRY_COUNT * ENTRY_SIZE / SECTOR // 32
     const val FIRST_USABLE_LBA = ENTRY_ARRAY_SECTOR + ENTRY_ARRAY_SECTORS // 34
-    const val BACKUP_ENTRY_ARRAY_SECTORS = 33
+
+    /**
+     * Disk sonundaki yedek alanın büyüklüğü: 32 sektör giriş dizisi +
+     * 1 sektör yedek başlık = 33 sektör.
+     */
+    const val BACKUP_ENTRY_ARRAY_RESERVED_SECTORS = ENTRY_ARRAY_SECTORS + 1
+
+    /**
+     * [diskSectors] büyüklüğündeki bir diskin son kullanılabilir LBA'sı.
+     *
+     * Disk sonundaki 33 sektör yedek GPT'ye ayrılmıştır:
+     * ```
+     * diskSectors − 33 .. diskSectors − 2   yedek giriş dizisi (32 sektör)
+     * diskSectors − 1                        yedek başlık
+     * ```
+     * Dolayısıyla son kullanılabilir LBA = diskSectors − 34'tür.
+     */
+    fun lastUsableLba(diskSectors: Long): Long = diskSectors - 1 - BACKUP_ENTRY_ARRAY_RESERVED_SECTORS
+
+    /** Yedek giriş dizisinin başladığı LBA. */
+    fun backupEntryArrayLba(diskSectors: Long): Long = diskSectors - 1 - ENTRY_ARRAY_SECTORS
 
     data class Entry(
         val typeGuid: String,
@@ -64,7 +84,7 @@ object GptTable {
         require(entries.size <= ENTRY_COUNT) { "GPT azami $ENTRY_COUNT bölüntü destekler." }
         require(diskSectors > FIRST_USABLE_LBA + 40) { "Disk GPT için çok küçük ($diskSectors sektör)." }
 
-        val lastUsable = diskSectors - 1 - BACKUP_ENTRY_ARRAY_SECTORS - 1
+        val lastUsable = lastUsableLba(diskSectors)
         require(entries.all { it.firstLba >= FIRST_USABLE_LBA && it.lastLba <= lastUsable }) {
             "Bölüntü aralıkları kullanılabilir LBA sınırları dışında ($FIRST_USABLE_LBA..$lastUsable)."
         }
@@ -73,24 +93,31 @@ object GptTable {
         val entryArray = buildEntryArray(entries)
         val backupEntryArray = entryArray.copyOf()
 
+        // Giriş dizisi CRC'si başlıkta saklanır (0x58) ve **başlık CRC'si
+        // bunun hesaplanmasından sonra** alınmalıdır; aksi hâlde başlık CRC'si
+        // sıfır olan giriş CRC'sini kapsar ve UEFI firmware hatalı bulur.
+        val entryArrayCrc = Crc32.compute(entryArray)
+
         val primary = buildHeader(
             diskSectors = diskSectors,
-            currentLba = HEADER_SECTOR,
+            currentLba = HEADER_SECTOR.toLong(),
             backupLba = diskSectors - 1,
-            firstUsable = FIRST_USABLE_LBA,
+            firstUsable = FIRST_USABLE_LBA.toLong(),
             lastUsable = lastUsable,
             diskGuid = guid,
-            entryArrayLba = ENTRY_ARRAY_SECTOR,
+            entryArrayLba = ENTRY_ARRAY_SECTOR.toLong(),
+            entryArrayCrc = entryArrayCrc,
         )
 
         val backup = buildHeader(
             diskSectors = diskSectors,
             currentLba = diskSectors - 1,
-            backupLba = HEADER_SECTOR,
-            firstUsable = FIRST_USABLE_LBA,
+            backupLba = HEADER_SECTOR.toLong(),
+            firstUsable = FIRST_USABLE_LBA.toLong(),
             lastUsable = lastUsable,
             diskGuid = guid,
-            entryArrayLba = diskSectors - 1 - BACKUP_ENTRY_ARRAY_RESERVED_SECTORS,
+            entryArrayLba = backupEntryArrayLba(diskSectors),
+            entryArrayCrc = entryArrayCrc,
         )
 
         return Layout(
@@ -99,16 +126,10 @@ object GptTable {
             entryArray = entryArray,
             backupEntryArray = backupEntryArray,
             backupHeader = backup,
-            firstUsableLba = FIRST_USABLE_LBA,
+            firstUsableLba = FIRST_USABLE_LBA.toLong(),
             lastUsableLba = lastUsable,
         )
     }
-
-    /**
-     * Disk sonundaki yedek alanın büyüklüğü: 1 sektör yedek başlık +
-     * 32 sektör yedek giriş dizisi = 33 sektör.
-     */
-    private const val BACKUP_ENTRY_ARRAY_RESERVED_SECTORS = 33
 
     private fun buildEntryArray(entries: List<Entry>): ByteArray {
         val buf = ByteArray(ENTRY_COUNT * ENTRY_SIZE)
@@ -132,30 +153,30 @@ object GptTable {
         lastUsable: Long,
         diskGuid: String,
         entryArrayLba: Long,
+        entryArrayCrc: Int,
     ): ByteArray {
         val h = ByteArray(SECTOR)
 
-        // 0x00: imza "EFI PART" (0x5452415020494645, küçük bayt = 'E','F','I',' ','P','A','R','T')
-        val sig = "EFI PART".toByteArray(Charsets.US_ASCII)
-        System.arraycopy(sig, 0, h, 0, 8)
+        // 0x00: imza "EFI PART"
+        System.arraycopy("EFI PART".toByteArray(Charsets.US_ASCII), 0, h, 0, 8)
 
-        putLe32(h, 0x08, 0x00010000)      // Revision 1.0
-        putLe32(h, 0x0C, HEADER_SIZE)    // HeaderSize
-        putLe32(h, 0x10, 0)               // CRC32 — sonra hesaplanacak
-        putLe32(h, 0x14, 0)               // Reserved
-        putLe64(h, 0x18, currentLba)      // MyLBA
-        putLe64(h, 0x20, backupLba)       // AlternateLBA
-        putLe64(h, 0x28, firstUsable)     // FirstUsableLBA
-        putLe64(h, 0x30, lastUsable)      // LastUsableLBA
-        System.arraycopy(Guid.toBytes(diskGuid), 0, h, 0x38, 16) // DiskGUID
-        putLe64(h, 0x48, entryArrayLba)   // PartitionEntryLBA
-        putLe32(h, 0x50, ENTRY_COUNT)     // NumberOfPartitionEntries
-        putLe32(h, 0x54, ENTRY_SIZE)      // SizeOfPartitionEntry
-        putLe32(h, 0x58, 0)               // PartitionEntryArrayCRC32 — sonra hesaplanacak
+        putLe32(h, 0x08, 0x00010000)              // Revision 1.0
+        putLe32(h, 0x0C, HEADER_SIZE.toLong())    // HeaderSize (92)
+        putLe32(h, 0x10, 0)                       // HeaderCRC32 — sonra hesaplanacak
+        putLe32(h, 0x14, 0)                       // Reserved (must be zero)
+        putLe64(h, 0x18, currentLba)              // MyLBA
+        putLe64(h, 0x20, backupLba)               // AlternateLBA
+        putLe64(h, 0x28, firstUsable)             // FirstUsableLBA
+        putLe64(h, 0x30, lastUsable)              // LastUsableLBA
+        System.arraycopy(Guid.toBytes(diskGuid), 0, h, 0x38, 16)   // DiskGUID
+        putLe64(h, 0x48, entryArrayLba)           // PartitionEntryLBA
+        putLe32(h, 0x50, ENTRY_COUNT.toLong())    // NumberOfPartitionEntries
+        putLe32(h, 0x54, ENTRY_SIZE.toLong())     // SizeOfPartitionEntry
+        putLe32(h, 0x58, entryArrayCrc.toLong())  // PartitionEntryArrayCRC32
 
-        // CRC alanları sıfırken hesapla.
-        putLe32(h, 0x58, 0)
-        putLe32(h, 0x10, Crc32.compute(h, 0, HEADER_SIZE))
+        // Başlık CRC'si, CRC alanı sıfırken **ilk 92 bayt** üzerinden alınır.
+        putLe32(h, 0x10, 0)
+        putLe32(h, 0x10, Crc32.compute(h, 0, HEADER_SIZE).toLong())
         return h
     }
 

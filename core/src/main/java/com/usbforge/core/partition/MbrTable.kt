@@ -77,7 +77,7 @@ object MbrTable {
             mbr[off] = if (e.bootable) 0x80.toByte() else 0
             mbr[off + 1] = head.toByte()
             mbr[off + 2] = cylSector.toByte()
-            mbr[off + 3] = cyl
+            mbr[off + 3] = cyl.toByte()
             mbr[off + 4] = (e.type and 0xFF).toByte()
             mbr[off + 5] = cylSector.toByte()
             mbr[off + 6] = head.toByte()

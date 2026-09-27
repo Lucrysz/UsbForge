@@ -154,7 +154,7 @@ object Scsi {
      */
     fun cdwInquiryVpd(page: Int, allocLength: Int, lun: Int = 0): ByteArray = ByteArray(6).also {
         it[0] = OP_INQUIRY.toByte()
-        it[1] = (lun and 0x1F).toByte() or 0x01 // EVPD bit
+        it[1] = ((lun and 0x1F) or 0x01).toByte() // EVPD bit
         it[2] = (page and 0xFF).toByte()
         it[3] = ((page ushr 8) and 0xFF).toByte()
         it[4] = (allocLength and 0xFF).toByte()
@@ -188,7 +188,7 @@ object Scsi {
         ByteArray(6).also {
             it[0] = OP_START_STOP_UNIT.toByte()
             it[1] = (lun and 0x1F).toByte()
-            it[4] = (if (start) 0x01 else 0x00) or 0x02 // LOEJ + Immed
+            it[4] = ((if (start) 0x01 else 0x00) or 0x02).toByte() // LOEJ + Immed
         }
 
     /** SYNCHRONIZE CACHE (10) — yazma önbelleğini diske zorlar. */
@@ -205,7 +205,7 @@ object Scsi {
         it[0] = OP_MODE_SENSE_6.toByte()
         it[1] = (lun and 0x1F).toByte()
         it[2] = page.toByte()
-        it[4] = 0xFF // tüm sayfalar
+        it[4] = 0xFF.toByte() // tüm sayfalar
     }
 
     /** MODE SELECT (6) — yazma korumasını kaldırmak için. */

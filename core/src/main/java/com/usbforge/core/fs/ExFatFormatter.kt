@@ -67,6 +67,7 @@ class ExFatFormatter(
         geo = g
 
         progress.setPhase("exFAT önyükleme kaydı hazırlanıyor")
+        device.prepareForWrite()
 
         // Ana önyükleme bölgesi: 24 sektör, 0x55AA imzası sadece 0. sektörde.
         val bootRegion = ByteArray(24 * 512)
@@ -163,8 +164,8 @@ class ExFatFormatter(
             putLe32(b, 0x4A, g.fatOffset)                              // FatOffset
             putLe32(b, 0x4E, g.fatLength)                             // FatLength
             putLe32(b, 0x52, g.clusterHeapOffset)                     // ClusterHeapOffset
-            putLe32(b, 0x56, g.clusterCount)                          // ClusterCount
-            putLe32(b, 0x5A, g.rootCluster)                            // FirstClusterOfRootDirectory
+            putLe32(b, 0x56, g.clusterCount.toLong())                          // ClusterCount
+            putLe32(b, 0x5A, g.rootCluster.toLong())                            // FirstClusterOfRootDirectory
             putLe32(b, 0x5E, g.volumeSerial)                          // VolumeSerialNumber
             putLe16(b, 0x62, 0x0100)                                  // FileSystemRevision 1.00
             putLe16(b, 0x64, 0)                                        // VolumeFlags
